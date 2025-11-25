@@ -26,15 +26,32 @@ class FlexibleQuantizedCacheConfig(QuantizedCacheConfig):
         backend (str): Backend for quantization. Options: "quanto", "hqq", "vanilla".
         nbits (Optional[int]): Precision for both key and value. Used if `nbits_key` and `nbits_value` are not set.
                                For per-layer or per-head quantization, set `nbits` to -1.
+                               For floating-point quantization, set to 8 and use quant_dtype="fp" (only FP8 is supported).
         nbits_key (Optional[int]): Precision for key quantization. For per-layer or per-head quantization, set to -1.
+                                   For floating-point quantization, set to 8 and use quant_dtype_key="fp" (only FP8 is supported).
         nbits_value (Optional[int]): Precision for value quantization. For per-layer or per-head quantization, set to -1.
+                                     For floating-point quantization, set to 8 and use quant_dtype_value="fp" (only FP8 is supported).
+        quant_dtype (Optional[str]): Quantization dtype. Options: "int" (default) or "fp" (floating-point).
+                                     Works only for Vanilla mode. With "fp", use nbits=8 for FP8 (only FP8 is currently supported).
+        quant_dtype_key (Optional[str]): Quantization dtype for keys. Options: "int" (default) or "fp". 
+                                         If not set, uses `quant_dtype`. Works only for Vanilla mode.
+        quant_dtype_value (Optional[str]): Quantization dtype for values. Options: "int" (default) or "fp".
+                                           If not set, uses `quant_dtype`. Works only for Vanilla mode.
+        fp_format (Optional[str]): FP8 format when using FP8 quantization (nbits=8). Options: "e4m3" (default) or "e5m2".
+                                    Works only for Vanilla mode with quant_dtype="fp" and nbits=8.
+        fp_format_key (Optional[str]): FP8 format for keys. If not set, uses `fp_format`.
+        fp_format_value (Optional[str]): FP8 format for values. If not set, uses `fp_format`.
         axis_key (Optional[int]): Axis for key quantization. In Vanilla mode:
-                                  - 0: Per-token quantization
+                                  - 0: Per-token & Per-head quantization 
+                                  # (implemented indepedent of args per_head_quant, which requires per_head_config that adjusts the quantization scheme for each head)
                                   - 1: Per-channel quantization
+                                  - 2: Per-token only quantization 
         axis_value (Optional[int]): Axis for value quantization. In Vanilla mode:
-                                    - 0: Per-token quantization
+                                    - 0: Per-token & Per-head quantization 
+                                    # (implemented indepedent of args per_head_quant, which requires per_head_config that adjusts the quantization scheme for each head)
                                     - 1: Per-channel quantization
-        asym (Optional[bool]): Whether to use asymmetric quantization. Works only for Vanilla mode.
+                                    - 2: per-token only quantization
+        asym (Optional[bool]): Whether to use asymmetric quantization. Works for both integer and floating-point quantization in Vanilla mode.
         q_group_size (Optional[int]): Group size for quantization. Use -1 for per-token quantization.
         residual_length (Optional[int]): Length of residual tokens that are not quantized.
                                          Must be a multiple of `q_group_size`. Use 0 for per-token quantization.
@@ -61,12 +78,18 @@ class FlexibleQuantizedCacheConfig(QuantizedCacheConfig):
         nbits: Optional[int] = 4,
         nbits_key: Optional[int] = 0,
         nbits_value: Optional[int] = 0,
+        quant_dtype: Optional[str] = "fp",
+        quant_dtype_key: Optional[str] = None,
+        quant_dtype_value: Optional[str] = None,
+        fp_format: Optional[str] = None,
+        fp_format_key: Optional[str] = None,
+        fp_format_value: Optional[str] = None,
         axis_key: Optional[int] = 0,
         axis_value: Optional[int] = 0,
         asym: Optional[bool] = False,
         q_group_size: Optional[int] = 64,
         residual_length: Optional[int] = 128,
-        compute_dtype: Optional[torch.dtype] = torch.float16,
+        compute_dtype: Optional[torch.dtype] = torch.bfloat16,
         device: Optional[str] = "cpu",
         force_quant: Optional[bool] = False,
         per_layer_quant: Optional[bool] = False,
@@ -88,6 +111,34 @@ class FlexibleQuantizedCacheConfig(QuantizedCacheConfig):
         )
         self.nbits_key = nbits_key if nbits_key else nbits
         self.nbits_value = nbits_value if nbits_value else nbits
+        self.quant_dtype = quant_dtype
+        self.quant_dtype_key = quant_dtype_key if quant_dtype_key is not None else quant_dtype
+        self.quant_dtype_value = quant_dtype_value if quant_dtype_value is not None else quant_dtype
+        self.fp_format = fp_format
+        self.fp_format_key = fp_format_key if fp_format_key is not None else fp_format
+        self.fp_format_value = fp_format_value if fp_format_value is not None else fp_format
+        
+        # Validate floating-point settings
+        if self.quant_dtype_key == "fp":
+            if self.backend != "vanilla":
+                raise ValueError("Floating-point quantization is only supported with backend='vanilla'")
+            # Validate nbits for floating-point (only FP8 is supported)
+            if self.quant_dtype_key == "fp" and self.nbits_key != 8:
+                raise NotImplementedError(
+                    f"Floating-point quantization with nbits_key={self.nbits_key} is not supported. "
+                    "Only FP8 (nbits_key=8) is currently supported via PyTorch's native float8 types."
+                )
+            if self.quant_dtype_value == "fp" and self.nbits_value != 8:
+                raise NotImplementedError(
+                    f"Floating-point quantization with nbits_value={self.nbits_value} is not supported. "
+                    "Only FP8 (nbits_value=8) is currently supported via PyTorch's native float8 types."
+                )
+            # FP8 format validation
+            if self.fp_format_key not in ["e4m3", "e5m2"]:
+                raise ValueError(f"fp_format_key must be 'e4m3' or 'e5m2' for FP8, got {self.fp_format_key}")
+            if self.fp_format_value not in ["e4m3", "e5m2"]:
+                raise ValueError(f"fp_format_value must be 'e4m3' or 'e5m2' for FP8, got {self.fp_format_value}")
+        
         self.asym = asym
         self.force_quant = force_quant
         if per_head_quant and per_layer_quant:
@@ -136,6 +187,12 @@ class FlexibleQuantizedCache(DynamicCache):
         self.nbits = cache_config.nbits
         self.nbits_key = cache_config.nbits_key
         self.nbits_value = cache_config.nbits_value
+        self.quant_dtype = getattr(cache_config, 'quant_dtype', 'int')
+        self.quant_dtype_key = getattr(cache_config, 'quant_dtype_key', self.quant_dtype)
+        self.quant_dtype_value = getattr(cache_config, 'quant_dtype_value', self.quant_dtype)
+        self.fp_format = getattr(cache_config, 'fp_format', 'e4m3')
+        self.fp_format_key = getattr(cache_config, 'fp_format_key', self.fp_format)
+        self.fp_format_value = getattr(cache_config, 'fp_format_value', self.fp_format)
         self.residual_length = cache_config.residual_length
         self.q_group_size = cache_config.q_group_size
         self.axis_key = cache_config.axis_key
@@ -170,19 +227,30 @@ class FlexibleQuantizedCache(DynamicCache):
         if not self.per_head_quant:
             nbits_key = self.nbits_key if not self.per_layer_quant else self.per_layer_config[layer_idx]['nbits_key']
             nbits_value = self.nbits_value if not self.per_layer_quant else self.per_layer_config[layer_idx]['nbits_value']
+            # Get quant_dtype and fp_format for keys and values
+            if self.per_layer_quant:
+                quant_dtype_key = self.per_layer_config[layer_idx].get('quant_dtype_key', self.quant_dtype_key)
+                quant_dtype_value = self.per_layer_config[layer_idx].get('quant_dtype_value', self.quant_dtype_value)
+                fp_format_key = self.per_layer_config[layer_idx].get('fp_format_key', self.fp_format_key)
+                fp_format_value = self.per_layer_config[layer_idx].get('fp_format_value', self.fp_format_value)
+            else:
+                quant_dtype_key = self.quant_dtype_key
+                quant_dtype_value = self.quant_dtype_value
+                fp_format_key = self.fp_format_key
+                fp_format_value = self.fp_format_value
             if len(self.key_cache) == layer_idx:
                 if self.force_quant:
                     # quirk: use dequantized key/value instead of original key/value
                     if self.residual_length:
                         tokens_to_keep = key_states.shape[-2] % self.residual_length
                         # keep tokens_to_keep by slicing the cache in axis -2
-                        self._quantized_key_cache.append(self._quantize(key_states[..., :-tokens_to_keep, :], axis=self.axis_key, nbits=nbits_key))
-                        self._quantized_value_cache.append(self._quantize(value_states[..., :-tokens_to_keep, :], axis=self.axis_value, nbits=nbits_value))
+                        self._quantized_key_cache.append(self._quantize(key_states[..., :-tokens_to_keep, :], axis=self.axis_key, nbits=nbits_key, quant_dtype=quant_dtype_key, fp_format=fp_format_key))
+                        self._quantized_value_cache.append(self._quantize(value_states[..., :-tokens_to_keep, :], axis=self.axis_value, nbits=nbits_value, quant_dtype=quant_dtype_value, fp_format=fp_format_value))
                         self.key_cache.append(key_states[..., -tokens_to_keep:, :])
                         self.value_cache.append(value_states[..., -tokens_to_keep:, :])
                     else:
-                        self._quantized_key_cache.append(self._quantize(key_states, axis=self.axis_key, nbits=nbits_key))
-                        self._quantized_value_cache.append(self._quantize(value_states, axis=self.axis_value, nbits=nbits_value))
+                        self._quantized_key_cache.append(self._quantize(key_states, axis=self.axis_key, nbits=nbits_key, quant_dtype=quant_dtype_key, fp_format=fp_format_key))
+                        self._quantized_value_cache.append(self._quantize(value_states, axis=self.axis_value, nbits=nbits_value, quant_dtype=quant_dtype_value, fp_format=fp_format_value))
                         self.key_cache.append(torch.zeros(0, dtype=key_states.dtype, device=key_states.device))
                         self.value_cache.append(torch.zeros(0, dtype=key_states.dtype, device=key_states.device))
                     keys_to_return = [self._dequantize(self._quantized_key_cache[layer_idx]), self.key_cache[layer_idx]]
@@ -190,8 +258,8 @@ class FlexibleQuantizedCache(DynamicCache):
                     keys_to_return = torch.cat(keys_to_return, dim=-2)
                     values_to_return = torch.cat(values_to_return, dim=-2)
                 else:
-                    self._quantized_key_cache.append(self._quantize(key_states.contiguous(), axis=self.axis_key, nbits=nbits_key))
-                    self._quantized_value_cache.append(self._quantize(value_states.contiguous(), axis=self.axis_value, nbits=nbits_value))
+                    self._quantized_key_cache.append(self._quantize(key_states.contiguous(), axis=self.axis_key, nbits=nbits_key, quant_dtype=quant_dtype_key, fp_format=fp_format_key))
+                    self._quantized_value_cache.append(self._quantize(value_states.contiguous(), axis=self.axis_value, nbits=nbits_value, quant_dtype=quant_dtype_value, fp_format=fp_format_value))
                     self.key_cache.append(torch.zeros(0, dtype=key_states.dtype, device=key_states.device))
                     self.value_cache.append(torch.zeros(0, dtype=key_states.dtype, device=key_states.device))
                     keys_to_return, values_to_return = key_states, value_states
@@ -207,9 +275,9 @@ class FlexibleQuantizedCache(DynamicCache):
                     self.key_cache[layer_idx].dim() == 4
                     and self.key_cache[layer_idx].shape[-2] + 1 >= self.residual_length
                 ):
-                    self._quantized_key_cache[layer_idx] = self._quantize(keys_to_return.contiguous(), axis=self.axis_key, nbits=nbits_key)
+                    self._quantized_key_cache[layer_idx] = self._quantize(keys_to_return.contiguous(), axis=self.axis_key, nbits=nbits_key, quant_dtype=quant_dtype_key, fp_format=fp_format_key)
                     self._quantized_value_cache[layer_idx] = self._quantize(
-                        values_to_return.contiguous(), axis=self.axis_value, nbits=nbits_value
+                        values_to_return.contiguous(), axis=self.axis_value, nbits=nbits_value, quant_dtype=quant_dtype_value, fp_format=fp_format_value
                     )
                     self.key_cache[layer_idx] = torch.zeros(0, dtype=key_states.dtype, device=key_states.device)
                     self.value_cache[layer_idx] = torch.zeros(0, dtype=key_states.dtype, device=key_states.device)
@@ -229,29 +297,39 @@ class FlexibleQuantizedCache(DynamicCache):
                 self.key_cache.append([])
                 self.value_cache.append([])
                 for head_idx, config in self.per_head_config[layer_idx].items():
+                    # Get quant_dtype and fp_format from per-head config, fallback to defaults
+                    quant_dtype_key = config.get('quant_dtype_key', self.quant_dtype_key)
+                    quant_dtype_value = config.get('quant_dtype_value', self.quant_dtype_value)
+                    fp_format_key = config.get('fp_format_key', self.fp_format_key)
+                    fp_format_value = config.get('fp_format_value', self.fp_format_value)
                     if self.force_quant:
                         if self.residual_length:
                             tokens_to_keep = key_states.shape[-2] % self.residual_length
-                            self._quantized_key_cache[layer_idx].append(self._quantize(key_states[head_idx][..., :-tokens_to_keep, :], axis=self.axis_key, nbits=config['nbits_key']))
-                            self._quantized_value_cache[layer_idx].append(self._quantize(value_states[head_idx][..., :-tokens_to_keep, :], axis=self.axis_value, nbits=config['nbits_value']))
+                            self._quantized_key_cache[layer_idx].append(self._quantize(key_states[head_idx][..., :-tokens_to_keep, :], axis=self.axis_key, nbits=config['nbits_key'], quant_dtype=quant_dtype_key, fp_format=fp_format_key))
+                            self._quantized_value_cache[layer_idx].append(self._quantize(value_states[head_idx][..., :-tokens_to_keep, :], axis=self.axis_value, nbits=config['nbits_value'], quant_dtype=quant_dtype_value, fp_format=fp_format_value))
                             self.key_cache[layer_idx].append(key_states[head_idx][..., -tokens_to_keep:, :])
                             self.value_cache[layer_idx].append(value_states[head_idx][..., -tokens_to_keep:, :])
                         else:
-                            self._quantized_key_cache[layer_idx].append(self._quantize(key_states[head_idx], axis=self.axis_key, nbits=config['nbits_key']))
-                            self._quantized_value_cache[layer_idx].append(self._quantize(value_states[head_idx], axis=self.axis_value, nbits=config['nbits_value']))
+                            self._quantized_key_cache[layer_idx].append(self._quantize(key_states[head_idx], axis=self.axis_key, nbits=config['nbits_key'], quant_dtype=quant_dtype_key, fp_format=fp_format_key))
+                            self._quantized_value_cache[layer_idx].append(self._quantize(value_states[head_idx], axis=self.axis_value, nbits=config['nbits_value'], quant_dtype=quant_dtype_value, fp_format=fp_format_value))
                             self.key_cache[layer_idx].append(torch.zeros(0, dtype=key_states.dtype, device=key_states.device))
                             self.value_cache[layer_idx].append(torch.zeros(0, dtype=key_states.dtype, device=key_states.device))
                         keys_to_return.append(torch.cat([self._dequantize(self._quantized_key_cache[layer_idx][-1]), self.key_cache[layer_idx][-1]], dim=-2))
                         values_to_return.append(torch.cat([self._dequantize(self._quantized_value_cache[layer_idx][-1]), self.value_cache[layer_idx][-1]], dim=-2))
                     else:
-                        self._quantized_key_cache[layer_idx].append(self._quantize(key_states[head_idx].contiguous(), axis=self.axis_key, nbits=config['nbits_key']))
-                        self._quantized_value_cache[layer_idx].append(self._quantize(value_states[head_idx].contiguous(), axis=self.axis_value, nbits=config['nbits_value']))
+                        self._quantized_key_cache[layer_idx].append(self._quantize(key_states[head_idx].contiguous(), axis=self.axis_key, nbits=config['nbits_key'], quant_dtype=quant_dtype_key, fp_format=fp_format_key))
+                        self._quantized_value_cache[layer_idx].append(self._quantize(value_states[head_idx].contiguous(), axis=self.axis_value, nbits=config['nbits_value'], quant_dtype=quant_dtype_value, fp_format=fp_format_value))
                         self.key_cache[layer_idx].append(torch.zeros(0, dtype=key_states.dtype, device=key_states.device))
                         self.value_cache[layer_idx].append(torch.zeros(0, dtype=key_states.dtype, device=key_states.device))
                         keys_to_return.append(key_states[head_idx])
                         values_to_return.append(value_states[head_idx])
             else:
                 for head_idx, config in self.per_head_config[layer_idx].items():
+                    # Get quant_dtype and fp_format from per-head config, fallback to defaults
+                    quant_dtype_key = config.get('quant_dtype_key', self.quant_dtype_key)
+                    quant_dtype_value = config.get('quant_dtype_value', self.quant_dtype_value)
+                    fp_format_key = config.get('fp_format_key', self.fp_format_key)
+                    fp_format_value = config.get('fp_format_value', self.fp_format_value)
                     dequant_key = self._dequantize(self._quantized_key_cache[layer_idx][head_idx])
                     dequant_value = self._dequantize(self._quantized_value_cache[layer_idx][head_idx])
                     keys_to_return.append(torch.cat([dequant_key, self.key_cache[layer_idx][head_idx], key_states[head_idx]], dim=-2))
@@ -260,8 +338,8 @@ class FlexibleQuantizedCache(DynamicCache):
                         self.key_cache[layer_idx][head_idx].dim() == 3
                         and self.key_cache[layer_idx][head_idx].shape[-2] + 1 >= self.residual_length
                     ):
-                        self._quantized_key_cache[layer_idx][head_idx] = self._quantize(keys_to_return[head_idx].contiguous(), axis=self.axis_key, nbits=config['nbits_key'])
-                        self._quantized_value_cache[layer_idx][head_idx] = self._quantize(values_to_return[head_idx].contiguous(), axis=self.axis_value, nbits=config['nbits_value'])
+                        self._quantized_key_cache[layer_idx][head_idx] = self._quantize(keys_to_return[head_idx].contiguous(), axis=self.axis_key, nbits=config['nbits_key'], quant_dtype=quant_dtype_key, fp_format=fp_format_key)
+                        self._quantized_value_cache[layer_idx][head_idx] = self._quantize(values_to_return[head_idx].contiguous(), axis=self.axis_value, nbits=config['nbits_value'], quant_dtype=quant_dtype_value, fp_format=fp_format_value)
                         self.key_cache[layer_idx][head_idx] = torch.zeros(0, dtype=key_states.dtype, device=key_states.device)
                         self.value_cache[layer_idx][head_idx] = torch.zeros(0, dtype=key_states.dtype, device=key_states.device)
                     else:
@@ -446,18 +524,22 @@ class FlexibleVanillaQuantizedCache(FlexibleQuantizedCache):
     def __init__(self, cache_config: CacheConfig) -> None:
         super().__init__(cache_config)
 
-        if self.axis_key not in [0, 1]:
-            raise ValueError(f"`axis_key` for `Vanilla` backend has to be one of [`0`, `1`] but got {self.axis_key}")
+        if self.axis_key not in [0, 1, 2]:
+            raise ValueError(f"`axis_key` for `Vanilla` backend has to be one of [`0`, `1`, `2`] but got {self.axis_key}")
 
-        if self.axis_value not in [0, 1]:
-            raise ValueError(f"`axis_value` for `Vanilla` backend has to be one of [`0`, `1`] but got {self.axis_value}")
+        if self.axis_value not in [0, 1, 2]:
+            raise ValueError(f"`axis_value` for `Vanilla` backend has to be one of [`0`, `1`, `2`] but got {self.axis_value}")
         
         self.quantilizers = {}
 
-    def _quantize(self, tensor, axis, nbits):
-        if (nbits, axis) not in self.quantilizers:
-            self.quantilizers[(nbits, axis)] = VanillaQuantizer(nbits, self.asym, self.compute_dtype)
-        quantilizer = self.quantilizers[(nbits, axis)]        
+    def _quantize(self, tensor, axis, nbits, quant_dtype="fp", fp_format="e4m3"):
+        # Create a unique key for the quantizer based on quantization parameters
+        quantizer_key = (nbits, axis, quant_dtype, fp_format)
+        if quantizer_key not in self.quantilizers:
+            self.quantilizers[quantizer_key] = VanillaQuantizer(
+                nbits, self.asym, self.compute_dtype, quant_dtype, fp_format
+            )
+        quantilizer = self.quantilizers[quantizer_key]        
         return quantilizer.quantize(tensor, self.q_group_size, axis)
     
     def _dequantize(self, qtensor):
