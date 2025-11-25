@@ -194,22 +194,25 @@ class VanillaQuantizer:
         if axis == 1:
             max_dim = len(tensor.shape) - 1
             tensor = tensor.transpose(max_dim - 1, max_dim)
-        if q_group_size == -1:
-            #  [batch, num_heads, n_tokens, dim_per_head]
-            if axis == 0:
-                # [batch, num_heads, n_tokens, dim_per_head]
-                # per-token & per-head
-                # assert axis == 0 # must be per-token
-                q_group_size = tensor.shape[-1] # take the last dimension
 
+        
+        
+        
+        if q_group_size == -1:
+            if axis == 0:
+                q_group_size = tensor.shape[-1]
             elif axis == 2:
                 # per-token only quantization
                 # input shape assumed: (B, H, T, D)
                 B, H, T, D = tensor.shape
                 q_group_size = H * D
-                rs = tensor.permute(0,2,1,3).reshape(B*T, q_group_size)
+            else:
+                raise ValueError(f"Unsupported axis: {axis}. Currently supported: 0, 2 when q_group_size == -1")
+    
+        if axis == 2:
+            rs = tensor.permute(0,2,1,3).reshape(B*T, q_group_size)
+        else:
             rs = tensor.reshape(-1, q_group_size)
-        
         # Handle floating-point quantization (FP8 only)
         if self.meta.quant_dtype == "fp":
             # Floating-point uses block-wise quantization with scaling
@@ -231,8 +234,8 @@ class VanillaQuantizer:
                 zeros = torch.clamp(zeros_float, min=fp_min, max=fp_max).to(self.meta.fp_dtype)
             else:
                 # Symmetric quantization: compute scale based on max absolute value
-                # Same pattern as example: scale = max_abs / fp_max, then quantize as x / scale
                 max_abs = rs.abs().max(dim=1).values
+                # Scale factor: max_abs / fp_max (inverse of what we use in quant_fp)
                 scale = max_abs.clamp(min=1e-5) / fp_max
                 zeros = None
             
