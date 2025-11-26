@@ -195,9 +195,6 @@ class VanillaQuantizer:
             max_dim = len(tensor.shape) - 1
             tensor = tensor.transpose(max_dim - 1, max_dim)
 
-        
-        
-        
         if q_group_size == -1:
             if axis == 0:
                 q_group_size = tensor.shape[-1]
