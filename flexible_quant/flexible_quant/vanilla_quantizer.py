@@ -1,5 +1,6 @@
 
 import torch
+from .fp8_kernel import fp8_row_scale_gemm
 
 
 def quant_sym(x: torch.tensor, scaling: torch.tensor, nbits: int):
@@ -52,7 +53,8 @@ def quant_fp(x: torch.tensor, scaling: torch.tensor, nbits: int, fp_format: str 
     
     fp_min = torch.finfo(fp_dtype).min
     fp_max = torch.finfo(fp_dtype).max
-    
+    x = x.to(scaling.dtype)
+
     # Scale the input - follow same pattern as integer quantization: x / scale - zeros
     if zeros is not None:
         # Asymmetric: same pattern as quant_asym: x / scale - zeros
@@ -96,8 +98,7 @@ def dequant_fp(x, scaling: torch.tensor, target_dtype: torch.dtype, nbits: int, 
     
     # FP8: Use PyTorch's native support
     # Convert FP8 to float32 first
-    dequantized = x.float()
-    
+    dequantized = x.to(scaling.dtype)
     # Get FP8 range for dequantization
     if fp_format == "e4m3":
         fp_dtype = torch.float8_e4m3fn
@@ -117,13 +118,17 @@ def dequant_fp(x, scaling: torch.tensor, target_dtype: torch.dtype, nbits: int, 
         dequantized = (dequantized + zeros_float.unsqueeze(1)) * scaling.unsqueeze(1)
     else:
         # Symmetric: multiply by scale to restore original range
-        dequantized = dequantized * scaling.unsqueeze(1)
-    
+        if scaling.dtype == torch.float8_e4m3fn:
+            # FP8 multiplication unsupported. Convert to float32 first
+            dequantized = dequantized.to(torch.float32)*scaling.unsqueeze(1).to(torch.float32)
+        else:
+            dequantized = dequantized * scaling.unsqueeze(1)
+
     return dequantized.to(target_dtype)
 
 
 class VanillaQuantizeMeta:
-    def __init__(self, nbits, asym, compute_dtype, quant_dtype="int", fp_format="e4m3"):
+    def __init__(self, nbits, asym, compute_dtype, quant_dtype="int", fp_format="e4m3", qparam_dtype=torch.float32):
         self.nbits = nbits
         # self.group_size = group_size
         # self.axis = axis # 1 for per-channel, 0 for per-token
@@ -131,6 +136,7 @@ class VanillaQuantizeMeta:
         self.compute_dtype = compute_dtype
         self.quant_dtype = quant_dtype  # "int" or "fp" (generalized floating-point)
         self.fp_format = fp_format  # "e4m3" or "e5m2" for FP8, None for auto
+        self.qparam_dtype = qparam_dtype
         
         # Set FP dtype if using floating-point quantization
         if self.quant_dtype == "fp":
@@ -146,10 +152,14 @@ class VanillaQuantizeMeta:
                 self.fp_dtype = torch.float8_e5m2
             else:
                 raise ValueError(f"Unsupported FP8 format: {self.fp_format}. Currently supported: e4m3, e5m2")
+            
+            if self.asym:
+                raise NotImplementedError("Asymmetric floating-point quantization is not supported yet.")
         elif self.quant_dtype == "int":
             self.fp_dtype = None
         else:
             raise ValueError(f"Unsupported quantization dtype: {self.quant_dtype}. Currently supported: int, fp")
+        assert qparam_dtype in [torch.float8_e4m3fn, torch.bfloat16, torch.float32], "qparam_dtype must be one of float8_e4m3fn, bfloat16, float32"
 
     
 class VanillaQuantizedTensor:
@@ -187,8 +197,8 @@ class VanillaQuantizedTensor:
         return dequant
 
 class VanillaQuantizer:
-    def __init__(self, nbits, asym, compute_dtype, quant_dtype="int", fp_format="e4m3"):
-        self.meta = VanillaQuantizeMeta(nbits, asym, compute_dtype, quant_dtype, fp_format)
+    def __init__(self, nbits, asym, compute_dtype, quant_dtype="int", fp_format="e4m3", qparam_dtype=torch.float32):
+        self.meta = VanillaQuantizeMeta(nbits, asym, compute_dtype, quant_dtype, fp_format, qparam_dtype)
     
     def quantize(self, tensor, q_group_size, axis):
         if axis == 1:
@@ -227,6 +237,11 @@ class VanillaQuantizer:
                 # Compute zero-point offset (same pattern as integer: _min / scale - fp_min)
                 # This ensures _min maps to fp_min: _min / scale - zeros = fp_min
                 # Quantize zeros to FP8 (like integer quantization quantizes zeros to int)
+                
+                
+                #TODO: Check and decide whether to do round(r/s+z_float) or round(r/s) + z_quantized
+                # Likewise, s*(q-z_quantized) or s*(q_float - z_float)
+            
                 zeros_float = (_min / scale) - fp_min
                 zeros = torch.clamp(zeros_float, min=fp_min, max=fp_max).to(self.meta.fp_dtype)
             else:
@@ -235,8 +250,10 @@ class VanillaQuantizer:
                 # Scale factor: max_abs / fp_max (inverse of what we use in quant_fp)
                 scale = max_abs.clamp(min=1e-5) / fp_max
                 zeros = None
+            orig_scale_dtype = scale.dtype
+            scale = scale.to(self.meta.qparam_dtype)
             
-            quant = quant_fp(rs, scale, self.meta.nbits, self.meta.fp_format, zeros)
+            quant = quant_fp(rs, scale.to(orig_scale_dtype), self.meta.nbits, self.meta.fp_format, zeros)
         else:
             # Integer quantization
             q_max, q_min = 2 ** (self.meta.nbits - 1) - 1, -2 ** (self.meta.nbits - 1)
