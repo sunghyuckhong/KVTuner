@@ -1,6 +1,5 @@
 
 import torch
-from .fp8_kernel import fp8_row_scale_gemm
 
 
 def quant_sym(x: torch.tensor, scaling: torch.tensor, nbits: int):
@@ -99,16 +98,6 @@ def dequant_fp(x, scaling: torch.tensor, target_dtype: torch.dtype, nbits: int, 
     # FP8: Use PyTorch's native support
     # Convert FP8 to float32 first
     dequantized = x.to(scaling.dtype)
-    # Get FP8 range for dequantization
-    if fp_format == "e4m3":
-        fp_dtype = torch.float8_e4m3fn
-    elif fp_format == "e5m2":
-        fp_dtype = torch.float8_e5m2
-    else:
-        fp_dtype = torch.float8_e4m3fn  # default
-    
-    fp_min = torch.finfo(fp_dtype).min
-    fp_max = torch.finfo(fp_dtype).max
     
     # Apply inverse scaling - follow same pattern as integer dequantization: (x + zeros) * scale
     if zeros is not None:
